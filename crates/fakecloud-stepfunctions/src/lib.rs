@@ -1,3 +1,4 @@
+pub(crate) mod apigateway_integration;
 pub mod choice;
 pub mod error_handling;
 pub mod interpreter;

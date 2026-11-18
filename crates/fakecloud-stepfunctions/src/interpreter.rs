@@ -2363,6 +2363,27 @@ async fn invoke_resource(
         });
     }
 
+    // Optimized API Gateway integration: request-response and
+    // `.waitForTaskToken` (whose token wait `execute_task_state` runs once the
+    // call returns). AWS offers no `.sync` form.
+    if let Some(tail) = integration.filter(|t| t.starts_with("apigateway:invoke")) {
+        if tail != "apigateway:invoke" && tail != "apigateway:invoke.waitForTaskToken" {
+            return Err((
+                "States.TaskFailed".to_string(),
+                format!("Unsupported resource: {resource}"),
+            ));
+        }
+        let registry_arc = resolve_registry(registry)?;
+        let account_id = account_from_execution_arn(execution_arn);
+        return crate::apigateway_integration::invoke(
+            &registry_arc,
+            input,
+            &account_id,
+            timeout_seconds,
+        )
+        .await;
+    }
+
     // Nested Step Functions execution:
     //   arn:aws:states:::states:startExecution[.sync|.waitForTaskToken]
     // Routes through the same registry path as the generic aws-sdk
