@@ -932,3 +932,66 @@ async fn describe_security_group_rules_honors_filters() {
     );
     assert_eq!(tagged[0].tags()[0].key(), Some("team"));
 }
+
+/// DescribeAvailabilityZones honours `ZoneId.N` and its filters: Terraform's
+/// `aws_availability_zones` data source selects zones with a `zone-id` filter.
+#[tokio::test]
+async fn describe_availability_zones_applies_zone_ids_and_filters() {
+    let server = TestServer::start().await;
+    let ec2 = aws_sdk_ec2::Client::new(&server.aws_config_in("us-east-1").await);
+    let ids = |output: aws_sdk_ec2::operation::describe_availability_zones::DescribeAvailabilityZonesOutput| -> Vec<String> {
+        output
+            .availability_zones()
+            .iter()
+            .filter_map(|z| z.zone_id().map(str::to_string))
+            .collect()
+    };
+    let filter = |name: &str, values: &[&str]| {
+        aws_sdk_ec2::types::Filter::builder()
+            .name(name)
+            .set_values(Some(values.iter().map(|v| v.to_string()).collect()))
+            .build()
+    };
+
+    let by_id = ec2
+        .describe_availability_zones()
+        .filters(filter("zone-id", &["use1-az1", "use1-az2", "use1-az4"]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ids(by_id), ["use1-az1", "use1-az2", "use1-az4"]);
+
+    let by_param = ec2
+        .describe_availability_zones()
+        .zone_ids("use1-az6")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ids(by_param), ["use1-az6"]);
+
+    let by_name = ec2
+        .describe_availability_zones()
+        .filters(filter("zone-name", &["us-east-1c", "us-east-1z"]))
+        .filters(filter("state", &["available"]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ids(by_name), ["use1-az3"]);
+
+    let wildcard = ec2
+        .describe_availability_zones()
+        .filters(filter("zone-name", &["us-east-1?"]))
+        .filters(filter("region-name", &["us-east-1"]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ids(wildcard).len(), 6);
+
+    let parentless = ec2
+        .describe_availability_zones()
+        .filters(filter("parent-zone-id", &["use1-az1"]))
+        .send()
+        .await
+        .unwrap();
+    assert!(ids(parentless).is_empty());
+}

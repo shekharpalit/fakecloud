@@ -9,7 +9,7 @@ use fakecloud_aws::ec2query::{ec2_elem, ec2_list};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
-use crate::service_helpers::{indexed_list, parse_filters};
+use crate::service_helpers::{filter_value_matches, indexed_list, parse_filters};
 
 use fakecloud_aws::regions::COMMERCIAL_REGIONS;
 
@@ -68,6 +68,8 @@ pub(crate) fn describe_availability_zones(
         &req.region
     };
     let requested = indexed_list(&req.query_params, "ZoneName");
+    let requested_ids = indexed_list(&req.query_params, "ZoneId");
+    let filters = parse_filters(&req.query_params);
     // A standard AZ's group name is its region; ModifyAvailabilityZoneGroup
     // opt-in status (if set) is reflected here so the round-trip is observable.
     let optin = {
@@ -81,6 +83,28 @@ pub(crate) fn describe_availability_zones(
     let items: Vec<String> = crate::defaults::region_zones(region)
         .into_iter()
         .filter(|(zone, _)| requested.is_empty() || requested.iter().any(|x| x == zone))
+        .filter(|(_, zone_id)| {
+            requested_ids.is_empty() || requested_ids.iter().any(|x| x == zone_id)
+        })
+        .filter(|(zone, zone_id)| {
+            filters.iter().all(|filter| {
+                // A standard zone has no parent zone, message or long group
+                // name, so filters on those match none of them.
+                let value = match filter.name.as_str() {
+                    "zone-name" => zone.as_str(),
+                    "zone-id" => zone_id.as_str(),
+                    "state" => "available",
+                    "region-name" | "group-name" => region,
+                    "zone-type" => "availability-zone",
+                    "opt-in-status" => opt_in_status,
+                    _ => return false,
+                };
+                filter
+                    .values
+                    .iter()
+                    .any(|pattern| filter_value_matches(pattern, value))
+            })
+        })
         .map(|(zone, zone_id)| {
             format!(
                 "{}{}{}{}{}{}{}",
