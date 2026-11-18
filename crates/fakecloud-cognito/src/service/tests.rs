@@ -1328,6 +1328,7 @@ fn self_service_delete_user_cleans_up_tokens() {
                 client_id: "test-client".to_string(),
                 issued_at: Utc::now(),
                 auth_context: None,
+                scopes: None,
             },
         );
     }
@@ -7878,6 +7879,7 @@ fn revoke_token_removes_refresh_token() {
                 client_id: client_id.clone(),
                 issued_at: chrono::Utc::now(),
                 auth_context: None,
+                scopes: None,
             },
         );
     }
@@ -7907,6 +7909,7 @@ fn seed_refresh_token(
             client_id: client_id.to_string(),
             issued_at: chrono::Utc::now(),
             auth_context: None,
+            scopes: None,
         },
     );
 }
@@ -8322,6 +8325,7 @@ fn get_tokens_from_refresh_token_client_mismatch_errors() {
                 client_id: client_a,
                 issued_at: chrono::Utc::now(),
                 auth_context: None,
+                scopes: None,
             },
         );
     }
@@ -8348,6 +8352,7 @@ fn get_tokens_from_refresh_token_returns_new_tokens() {
                 client_id: client_id.clone(),
                 issued_at: chrono::Utc::now(),
                 auth_context: None,
+                scopes: None,
             },
         );
     }
@@ -8392,6 +8397,7 @@ fn get_tokens_from_refresh_token_rotation_makes_old_token_single_use() {
                 client_id: client_id.clone(),
                 issued_at: chrono::Utc::now(),
                 auth_context: None,
+                scopes: None,
             },
         );
     }
@@ -9465,6 +9471,7 @@ fn oauth_refresh_token_grant_applies_pretoken_overrides_to_access_token() {
                 client_id: client_id.clone(),
                 issued_at: Utc::now(),
                 auth_context: None,
+                scopes: None,
             },
         );
     }
@@ -11183,6 +11190,7 @@ fn refresh_token_expiry_enforced() {
                 client_id: client_id.clone(),
                 issued_at: chrono::Utc::now() - chrono::Duration::days(2),
                 auth_context: None,
+                scopes: None,
             },
         );
         st.refresh_tokens.insert(
@@ -11193,6 +11201,7 @@ fn refresh_token_expiry_enforced() {
                 client_id: client_id.clone(),
                 issued_at: chrono::Utc::now(),
                 auth_context: None,
+                scopes: None,
             },
         );
     }
@@ -12765,6 +12774,7 @@ fn failed_pre_token_generation_keeps_the_rotated_refresh_token() {
                 client_id: client_id.clone(),
                 issued_at: chrono::Utc::now(),
                 auth_context: None,
+                scopes: None,
             },
         );
     }
@@ -12948,6 +12958,7 @@ fn oauth_refresh_grant_fails_on_pre_token_generation_error() {
                 client_id: client_id.clone(),
                 issued_at: Utc::now(),
                 auth_context: None,
+                scopes: None,
             },
         );
     }
@@ -13405,4 +13416,158 @@ fn invitation_uses_the_pools_own_account() {
         "CustomMessage_AdminCreateUser"
     );
     assert_eq!(email.0.lock()[0].1, "hi x");
+}
+
+/// A V2_0/V3_0 pre-token trigger is configured as `PreTokenGenerationConfig`
+/// (`LambdaArn` + `LambdaVersion`) with no legacy `PreTokenGeneration` key; the
+/// hosted-UI grant runs it all the same.
+#[test]
+fn oauth_authorization_code_grant_runs_a_pre_token_generation_config_trigger() {
+    let (svc, state) = svc_with_pretoken_lambda();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "alice");
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PreTokenGenerationConfig": {
+            "LambdaArn": "arn:aws:lambda:us-east-1:123456789012:function:pretoken",
+            "LambdaVersion": "V3_0"
+        }}),
+    );
+    seed_code(&state, &pool_id, &client_id, "code-v3", vec![]);
+    let ctx = pretoken_ctx();
+    let resp = block_on(handle_oauth2_token(
+        &state,
+        &code_grant(&client_id, "code-v3"),
+        None,
+        "us-east-1",
+        Some(&ctx),
+    ))
+    .unwrap();
+    assert_eq!(decode_jwt_claims(&resp.access_token)["tenant"], "acme");
+}
+
+/// Cognito issues a refreshed access token with the scopes of the hosted-UI
+/// grant that issued the refresh token, not the API flows' default scope.
+#[test]
+fn oauth_refresh_token_grant_keeps_the_scopes_of_the_sign_in() {
+    let (svc, state) = svc_with_pretoken_lambda();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "alice");
+    let scopes = vec!["openid".to_string(), "engine/access".to_string()];
+    seed_code(&state, &pool_id, &client_id, "code-scoped", scopes);
+    let signed_in = block_on(handle_oauth2_token(
+        &state,
+        &code_grant(&client_id, "code-scoped"),
+        None,
+        "us-east-1",
+        None,
+    ))
+    .unwrap();
+    assert_eq!(
+        decode_jwt_claims(&signed_in.access_token)["scope"],
+        "openid engine/access"
+    );
+
+    let mut params = std::collections::BTreeMap::new();
+    params.insert("grant_type".to_string(), "refresh_token".to_string());
+    params.insert(
+        "refresh_token".to_string(),
+        signed_in.refresh_token.clone().unwrap(),
+    );
+    params.insert("client_id".to_string(), client_id.clone());
+    let refreshed = block_on(handle_oauth2_token(
+        &state,
+        &params,
+        None,
+        "us-east-1",
+        None,
+    ))
+    .unwrap();
+    assert_eq!(
+        decode_jwt_claims(&refreshed.access_token)["scope"],
+        "openid engine/access"
+    );
+}
+
+/// RFC 6749 §2.3.1: a client form-encodes its id and secret before Basic
+/// encoding them, so a secret's `+` arrives as `%2B`. Cognito accepts the
+/// encoded form and the bare one; a wrong secret still fails.
+#[test]
+fn oauth_token_accepts_form_encoded_basic_credentials() {
+    let (svc, state) = svc_with_pretoken_lambda();
+    let pool_id = create_pool(&svc);
+    let body = json!({
+        "UserPoolId": pool_id,
+        "ClientName": "confidential",
+        "ClientSecret": "secret+with+plus_0123456789abcdef",
+    });
+    let created = resp_json(
+        &svc.create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+            .unwrap(),
+    );
+    let client_id = created["UserPoolClient"]["ClientId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    admin_create_user_helper(&svc, &pool_id, "alice");
+    for (code, secret, accepted) in [
+        (
+            "code-encoded",
+            "secret%2Bwith%2Bplus_0123456789abcdef",
+            true,
+        ),
+        ("code-bare", "secret+with+plus_0123456789abcdef", true),
+        ("code-wrong", "secret%2Bwith%2Bminus_0123456789abcde", false),
+    ] {
+        seed_code(&state, &pool_id, &client_id, code, vec![]);
+        let mut params = code_grant(&client_id, code);
+        params.remove("client_id");
+        let outcome = block_on(handle_oauth2_token(
+            &state,
+            &params,
+            Some((client_id.as_str(), secret)),
+            "us-east-1",
+            None,
+        ));
+        assert_eq!(outcome.is_ok(), accepted, "{secret}");
+    }
+}
+
+fn seed_code(
+    state: &crate::state::SharedCognitoState,
+    pool_id: &str,
+    client_id: &str,
+    code: &str,
+    scopes: Vec<String>,
+) {
+    let mut w = state.write();
+    w.default_mut().authorization_codes.insert(
+        code.to_string(),
+        AuthorizationCodeData {
+            user_pool_id: pool_id.to_string(),
+            client_id: client_id.to_string(),
+            username: "alice".to_string(),
+            redirect_uri: "https://app/callback".to_string(),
+            scopes,
+            code_challenge: None,
+            code_challenge_method: None,
+            nonce: None,
+            issued_at: Utc::now(),
+        },
+    );
+}
+
+fn code_grant(client_id: &str, code: &str) -> std::collections::BTreeMap<String, String> {
+    let mut params = std::collections::BTreeMap::new();
+    params.insert("grant_type".to_string(), "authorization_code".to_string());
+    params.insert("code".to_string(), code.to_string());
+    params.insert(
+        "redirect_uri".to_string(),
+        "https://app/callback".to_string(),
+    );
+    params.insert("client_id".to_string(), client_id.to_string());
+    params
 }

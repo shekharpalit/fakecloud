@@ -360,6 +360,12 @@ pub struct RefreshTokenData {
     /// ACR/AMR of the sign-in that issued this token; refreshed tokens keep it.
     #[serde(default)]
     pub auth_context: Option<AuthContext>,
+    /// Space-separated OAuth scopes of the hosted-UI grant that issued this
+    /// token; a `refresh_token` grant issues access tokens with the same scopes.
+    /// `None` for tokens from the API auth flows, whose access tokens carry
+    /// `aws.cognito.signin.user.admin`.
+    #[serde(default)]
+    pub scopes: Option<String>,
 }
 
 /// Single-use OAuth2 authorization code minted by `/oauth2/authorize`

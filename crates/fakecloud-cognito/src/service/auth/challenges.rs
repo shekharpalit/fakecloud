@@ -204,6 +204,7 @@ impl CognitoService {
                 client_id: client_id.to_string(),
                 issued_at: Utc::now(),
                 auth_context: auth_context.clone(),
+                scopes: None,
             },
         );
         state.access_tokens.insert(
@@ -1095,6 +1096,7 @@ impl CognitoService {
                 client_id: client_id.to_string(),
                 issued_at: Utc::now(),
                 auth_context: None,
+                scopes: None,
             },
         );
 
@@ -1503,6 +1505,7 @@ impl CognitoService {
                 client_id: client_id.to_string(),
                 issued_at: Utc::now(),
                 auth_context: None,
+                scopes: None,
             },
         );
         state.access_tokens.insert(

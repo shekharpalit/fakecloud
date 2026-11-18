@@ -793,6 +793,7 @@ impl CognitoService {
                         client_id: client_id.to_string(),
                         issued_at: Utc::now(),
                         auth_context: claims.auth_context.clone(),
+                        scopes: None,
                     },
                 );
                 let replaced = state.refresh_tokens.remove(refresh_token);

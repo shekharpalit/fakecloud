@@ -2943,6 +2943,28 @@ fn oauth_client_credentials<'a>(
     Some((client_id, secret))
 }
 
+/// `application/x-www-form-urlencoded` decoding of one Basic credential:
+/// RFC 6749 §2.3.1 has a client encode its id and secret this way before
+/// base64-encoding the pair. `None` when the escapes are malformed.
+fn form_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' => {
+                let hex = value.get(i + 1..i + 3)?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 2;
+            }
+            other => out.push(other),
+        }
+        i += 1;
+    }
+    String::from_utf8(out).ok()
+}
+
 pub async fn handle_oauth2_token(
     state: &SharedCognitoState,
     params: &BTreeMap<String, String>,
@@ -2955,8 +2977,17 @@ pub async fn handle_oauth2_token(
         .map(String::as_str)
         .ok_or(OAuthTokenError::InvalidRequest("grant_type is required"))?;
 
-    let (client_id, supplied_secret) =
-        oauth_client_credentials(params, basic_auth).ok_or(OAuthTokenError::InvalidClient)?;
+    // Cognito accepts Basic credentials form-encoded (RFC 6749 §2.3.1) or as
+    // they are; a secret matches when either reading of it does.
+    let decoded_basic =
+        basic_auth.and_then(|(id, secret)| Some((form_decode(id)?, form_decode(secret)?)));
+    let decoded_ref = decoded_basic
+        .as_ref()
+        .map(|(id, secret)| (id.as_str(), secret.as_str()));
+    let (client_id, supplied_secret) = oauth_client_credentials(params, decoded_ref)
+        .or_else(|| oauth_client_credentials(params, basic_auth))
+        .ok_or(OAuthTokenError::InvalidClient)?;
+    let raw_secret = basic_auth.map(|(_, secret)| secret);
     let client_id = client_id.ok_or(OAuthTokenError::InvalidRequest("client_id is required"))?;
 
     // `secret_ok` is `None` for a public client, else whether the supplied
@@ -2968,9 +2999,10 @@ pub async fn handle_oauth2_token(
             if let Some(client) = account.user_pool_clients.get(client_id) {
                 found = Some((
                     client.user_pool_id.clone(),
-                    client
-                        .is_confidential()
-                        .then(|| supplied_secret.is_some_and(|s| client.secret_matches(s))),
+                    client.is_confidential().then(|| {
+                        supplied_secret.is_some_and(|s| client.secret_matches(s))
+                            || raw_secret.is_some_and(|s| client.secret_matches(s))
+                    }),
                     client.allowed_o_auth_flows.clone(),
                     client.allowed_o_auth_scopes.clone(),
                     client.allowed_o_auth_flows_user_pool_client,
@@ -3151,6 +3183,7 @@ async fn handle_authorization_code_grant(
                     client_id: client_id.to_string(),
                     issued_at: Utc::now(),
                     auth_context: None,
+                    scopes: scope_str.clone(),
                 },
             );
             account.access_tokens.insert(
@@ -3189,7 +3222,7 @@ async fn handle_refresh_token_grant(
         .get("refresh_token")
         .map(String::as_str)
         .ok_or(OAuthTokenError::InvalidRequest("refresh_token is required"))?;
-    let (username, sub, auth_context) = {
+    let (username, sub, auth_context, scopes) = {
         let mas = state.read();
         let mut found = Err(OAuthTokenError::InvalidGrant);
         for (_, account) in mas.iter() {
@@ -3216,7 +3249,12 @@ async fn handle_refresh_token_grant(
                     .and_then(|users| users.get(&rt.username))
                     .map(|u| u.sub.clone())
                     .unwrap_or_default();
-                found = Ok((rt.username.clone(), sub, rt.auth_context.clone()));
+                found = Ok((
+                    rt.username.clone(),
+                    sub,
+                    rt.auth_context.clone(),
+                    rt.scopes.clone(),
+                ));
                 break;
             }
         }
@@ -3244,7 +3282,7 @@ async fn handle_refresh_token_grant(
         &username,
         region,
         signing_ref,
-        None,
+        scopes.as_deref(),
         None,
         overrides.as_ref(),
         &claims,
@@ -3273,6 +3311,7 @@ async fn handle_refresh_token_grant(
                             client_id: old.client_id,
                             issued_at: Utc::now(),
                             auth_context: old.auth_context,
+                            scopes: old.scopes,
                         },
                     );
                     account.refresh_tokens.remove(refresh_token);
@@ -4050,6 +4089,21 @@ pub async fn handle_oauth2_authorize(
             html: render_login_form(req),
         });
     };
+
+    // A pool that signs in by email, phone or preferred_username stores a
+    // generated username; resolve the identifier the person typed to it.
+    let resolved_username = {
+        let mas = state.read();
+        let resolved = mas
+            .iter()
+            .find(|(_, account)| account.users.contains_key(&pool_id))
+            .map_or_else(
+                || username.to_string(),
+                |(_, account)| resolve_alias_username(account, &pool_id, username),
+            );
+        resolved
+    };
+    let username = resolved_username.as_str();
 
     // Verify credentials inline. We don't run the
     // PreAuthentication/PostAuthentication Lambda triggers here —

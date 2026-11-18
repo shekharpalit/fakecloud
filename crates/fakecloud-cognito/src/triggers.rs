@@ -181,7 +181,13 @@ pub fn get_trigger_arn(
         .find_map(|(_, state)| state.user_pools.get(pool_id))?;
     let lambda_config = pool.lambda_config.as_ref()?;
     let key = trigger_source.lambda_config_key();
-    let raw = lambda_config.get(key)?;
+    // A V2_0/V3_0 pre-token trigger is stored as `PreTokenGenerationConfig`
+    // (`LambdaArn` + `LambdaVersion`), without the legacy `PreTokenGeneration` key.
+    let raw = lambda_config.get(key).or_else(|| {
+        (key == "PreTokenGeneration")
+            .then(|| lambda_config.get("PreTokenGenerationConfig"))
+            .flatten()
+    })?;
     if let Some(s) = raw.as_str() {
         return Some(s.to_string());
     }

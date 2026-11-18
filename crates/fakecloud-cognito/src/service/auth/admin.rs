@@ -262,6 +262,7 @@ impl CognitoService {
                 client_id: input.client_id.clone(),
                 issued_at: Utc::now(),
                 auth_context: None,
+                scopes: None,
             },
         );
 
