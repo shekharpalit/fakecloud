@@ -146,6 +146,13 @@ pub(crate) fn strip_nulls(mut value: Value) -> Value {
     value
 }
 
+/// A REST API's resource policy as AWS returns it: the stored document with
+/// its quotes and backslashes escaped, so clients unquote it once.
+pub(crate) fn escaped_policy(policy: &str) -> String {
+    let quoted = serde_json::to_string(policy).expect("string serialization is infallible");
+    quoted[1..quoted.len() - 1].to_string()
+}
+
 pub(crate) fn rest_api_to_json(api: &RestApi) -> Value {
     strip_nulls(json!({
         "id": api.id,
@@ -154,8 +161,9 @@ pub(crate) fn rest_api_to_json(api: &RestApi) -> Value {
         "version": api.version,
         "createdDate": api.created_date.timestamp(),
         "apiKeySource": api.api_key_source,
+        "apiStatus": "AVAILABLE",
         "endpointConfiguration": api.endpoint_configuration,
-        "policy": api.policy,
+        "policy": api.policy.as_deref().map(escaped_policy),
         "binaryMediaTypes": api.binary_media_types,
         "minimumCompressionSize": api.minimum_compression_size,
         "disableExecuteApiEndpoint": api.disable_execute_api_endpoint,

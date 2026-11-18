@@ -1616,3 +1616,40 @@ async fn update_account_patches_only_supported_paths() {
     let got = client.get_account().send().await.unwrap();
     assert_eq!(got.cloudwatch_role_arn(), Some(role));
 }
+
+/// GetRestApi reports `apiStatus` and returns the resource policy escaped, as
+/// AWS does: clients such as Terraform's provider unquote the policy once and
+/// wait for `AVAILABLE` after creating an API.
+#[tokio::test]
+async fn rest_api_reports_status_and_escaped_policy() {
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+    let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"execute-api:Invoke","Resource":"*"}]}"#;
+
+    let created = client
+        .create_rest_api()
+        .name("with-policy")
+        .policy(policy)
+        .send()
+        .await
+        .expect("create_rest_api");
+    assert_eq!(
+        created.api_status(),
+        Some(&aws_sdk_apigateway::types::ApiStatus::Available)
+    );
+
+    let described = client
+        .get_rest_api()
+        .rest_api_id(created.id().unwrap())
+        .send()
+        .await
+        .expect("get_rest_api");
+    assert_eq!(
+        described.api_status(),
+        Some(&aws_sdk_apigateway::types::ApiStatus::Available)
+    );
+    assert_eq!(
+        described.policy(),
+        Some(policy.replace('"', "\\\"").as_str())
+    );
+}
