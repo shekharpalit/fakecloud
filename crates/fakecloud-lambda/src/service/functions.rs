@@ -6,6 +6,33 @@ impl LambdaService {
     pub(crate) fn create_function(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
         let mut input = CreateFunctionInput::from_body(&body, &req.region)?;
+        if input.code_zip.is_none() && input.package_type != "Image" {
+            let code = &body["Code"];
+            if let (Some(bucket), Some(key), Some(s3)) = (
+                code["S3Bucket"].as_str(),
+                code["S3Key"].as_str(),
+                &self.s3_delivery,
+            ) {
+                let zip = s3
+                    .get_object_version(
+                        &req.account_id,
+                        bucket,
+                        key,
+                        code["S3ObjectVersion"].as_str(),
+                    )
+                    .map_err(|e| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterValueException",
+                            format!(
+                                "Error occurred while GetObject. S3 Error Code: NoSuchKey. \
+                                 S3 Error Message: {e}"
+                            ),
+                        )
+                    })?;
+                input.code_zip = Some(zip);
+            }
+        }
         if let Some(cfg) = &input.durable_config {
             crate::durable::config::check_configured_key(
                 self.durable.kms().as_deref(),

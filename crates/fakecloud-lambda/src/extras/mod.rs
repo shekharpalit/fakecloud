@@ -940,7 +940,12 @@ impl LambdaService {
         ) {
             (Some(bucket), Some(key)) if new_zip.is_none() && new_image_uri.is_none() => {
                 if let Some(s3) = &self.s3_delivery {
-                    match s3.get_object(&req.account_id, bucket, key) {
+                    match s3.get_object_version(
+                        &req.account_id,
+                        bucket,
+                        key,
+                        body["S3ObjectVersion"].as_str(),
+                    ) {
                         Ok(bytes) => Some(bytes),
                         Err(e) => {
                             return Err(AwsServiceError::aws_error(

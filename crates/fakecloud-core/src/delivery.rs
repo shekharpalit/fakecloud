@@ -514,6 +514,24 @@ pub trait S3Delivery: Send + Sync {
     /// `RestoreDBInstanceFromS3` to ingest a backup blob without taking
     /// a direct dep on the S3 crate.
     fn get_object(&self, account_id: &str, bucket: &str, key: &str) -> Result<Vec<u8>, String>;
+
+    /// [`S3Delivery::get_object`] of one version (`None` = the current one),
+    /// as Lambda reads `Code.S3ObjectVersion`. Without versioned storage only
+    /// the current object can be read.
+    fn get_object_version(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+    ) -> Result<Vec<u8>, String> {
+        match version_id {
+            None => self.get_object(account_id, bucket, key),
+            Some(version) => Err(format!(
+                "version {version} of {key} in bucket {bucket} cannot be read"
+            )),
+        }
+    }
 }
 
 /// SES SendEmail dispatch for callers that already speak the AWS SES

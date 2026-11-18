@@ -519,9 +519,20 @@ impl S3Delivery for S3DeliveryImpl {
     }
 
     fn get_object(&self, account_id: &str, bucket: &str, key: &str) -> Result<Vec<u8>, String> {
+        self.get_object_version(account_id, bucket, key, None)
+    }
+
+    fn get_object_version(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        key: &str,
+        version_id: Option<&str>,
+    ) -> Result<Vec<u8>, String> {
         // Read as GetObject returns it (an SSE-KMS object decrypts), with the
         // body read after the S3 guard is released.
-        match crate::body_io::read_object(&self.state, account_id, bucket, key) {
+        match crate::body_io::read_object_version(&self.state, account_id, bucket, key, version_id)
+        {
             Some(Ok(body)) => Ok(body.to_vec()),
             Some(Err(e)) => Err(format!("failed to read body: {e}")),
             None => {
@@ -531,7 +542,12 @@ impl S3Delivery for S3DeliveryImpl {
                     .get(account_id)
                     .is_some_and(|s| s.buckets.contains_key(bucket));
                 Err(if exists {
-                    format!("key {key} not found in bucket {bucket}")
+                    match version_id {
+                        Some(version) => {
+                            format!("version {version} of key {key} not found in bucket {bucket}")
+                        }
+                        None => format!("key {key} not found in bucket {bucket}"),
+                    }
                 } else {
                     format!("bucket {bucket} not found in account {account_id}")
                 })
