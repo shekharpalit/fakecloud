@@ -90,13 +90,51 @@ resource — does not exist), `ConcurrentModificationException`, and
 `ConflictException` (a duplicate channel namespace). State is
 account-partitioned and persists across restarts in persistent mode.
 
+## GraphQL data plane
+
+A GraphQL API answers on its own hosts, as on AWS:
+
+- **`POST https://<apiId>.appsync-api.<region>.amazonaws.com/graphql`** runs a
+  query or mutation. The caller authenticates with SigV4 (`AWS_IAM`), an API
+  key (`x-api-key`, `API_KEY`) or a Cognito user pool token
+  (`AMAZON_COGNITO_USER_POOLS`: the token's signature is checked with the
+  pool's signing key, and its issuer, expiry and the provider's
+  `appIdClientRegex` are checked). Fields are authorized by AppSync's rules:
+  a field's `@aws_iam`, `@aws_cognito_user_pools` or `@aws_api_key`
+  directives decide, else its type's, else only the API's default mode.
+  Unauthenticated requests get a 401 `UnauthorizedException`; an unauthorized
+  field is `null` with an `Unauthorized` error.
+- **Resolvers** that are `UNIT` `APPSYNC_JS` resolvers on a `NONE` data source
+  run in an embedded JavaScript engine: the code is an ES module importing
+  `@aws-appsync/utils` (`util.authType`, `util.matches`, `util.error`,
+  `util.appendError`, `util.unauthorized`, `util.autoId`, `util.time.*`,
+  `util.transform.toSubscriptionFilter`, `extensions.*`, `runtime.earlyReturn`),
+  its `request` handler's `payload` is the data source result, and its
+  `response` handler's value is the field's. A run is bounded by loop and
+  recursion limits.
+- **`wss://<apiId>.appsync-realtime-api.<region>.amazonaws.com/graphql`**
+  speaks AppSync's `graphql-ws` realtime protocol: the connection header as
+  the `header-<base64url>` subprotocol or the `header` query parameter,
+  `connection_init`/`connection_ack`, `start`/`start_ack`/`error`, `data`,
+  `ka` keep-alives, and `stop`/`complete`. A subscription field's resolver
+  authorizes it and may set an enhanced filter
+  (`extensions.setSubscriptionFilter`) and an invalidation filter. Each
+  mutation result is delivered to the subscriptions whose field names the
+  mutation in `@aws_subscribe` and whose filter passes it, shaped by the
+  subscription's selection; `extensions.invalidateSubscriptions` ends the
+  matching subscriptions with `complete`.
+
+Point a client's DNS (or an HTTP proxy) at fakecloud for these hostnames; a
+client that needs TLS needs a TLS front with a certificate it trusts.
+
 ## Honest limitations
 
-- **GraphQL query execution is not implemented.** fakecloud models the AppSync
-  *control plane* and schema state; it does not resolve GraphQL queries or
-  subscriptions against the configured data sources. This is the faithful
-  control plane such an execution engine would build on, and it is a candidate
-  for a later batch.
+- **GraphQL execution covers `APPSYNC_JS` unit resolvers on `NONE` data
+  sources.** A resolver of another kind (VTL, `PIPELINE`, or a DynamoDB,
+  Lambda, HTTP, OpenSearch or RDS data source) answers its field with an
+  `UnsupportedOperation` error that names what it uses. `OPENID_CONNECT` and
+  `AWS_LAMBDA` authorization are not checked. SigV4 signatures are not
+  recomputed, as everywhere in fakecloud.
 - **`EvaluateCode` / `EvaluateMappingTemplate` run a documented evaluation
   subset.** They validate that the code/template and the `context` are
   well-formed and deterministically render the context's `arguments` (the

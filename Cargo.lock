@@ -4547,16 +4547,22 @@ name = "fakecloud-appsync"
 version = "0.52.0"
 dependencies = [
  "async-trait",
+ "axum",
  "base64 0.22.1",
+ "boa_engine",
  "bytes",
  "chrono",
  "fakecloud-aws",
+ "fakecloud-cognito",
  "fakecloud-core",
  "fakecloud-persistence",
+ "futures-util",
+ "graphql-parser",
  "http 1.4.0",
  "parking_lot",
  "percent-encoding",
  "rand 0.8.5",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -7580,6 +7586,16 @@ name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
+
+[[package]]
+name = "graphql-parser"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a818c0d883d7c0801df27be910917750932be279c7bc82dc541b8769425f409"
+dependencies = [
+ "combine",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "group"

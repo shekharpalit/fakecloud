@@ -159,6 +159,8 @@ pub struct AppSyncService {
     state: SharedAppSyncState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    realtime: Arc<crate::data_plane::realtime::Realtime>,
+    cognito: Option<fakecloud_cognito::SharedCognitoState>,
 }
 
 impl AppSyncService {
@@ -167,7 +169,78 @@ impl AppSyncService {
             state,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            realtime: crate::data_plane::realtime::Realtime::new(),
+            cognito: None,
         }
+    }
+
+    /// The user pools `AMAZON_COGNITO_USER_POOLS` callers' tokens are checked against.
+    pub fn with_cognito(mut self, cognito: fakecloud_cognito::SharedCognitoState) -> Self {
+        self.cognito = Some(cognito);
+        self
+    }
+
+    /// The subscriptions the realtime endpoint serves, which mutations reach.
+    pub fn realtime(&self) -> Arc<crate::data_plane::realtime::Realtime> {
+        self.realtime.clone()
+    }
+
+    /// `POST /graphql` on `<apiId>.appsync-api.<region>.amazonaws.com`.
+    async fn graphql(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        use crate::data_plane::{api_id_of_host, authenticate, execute, snapshot, Credentials};
+        let header = |name: &str| {
+            req.headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let api = header("host")
+            .and_then(|host| api_id_of_host(&host, false))
+            .and_then(|api_id| snapshot(&self.state, &api_id))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NotFoundException",
+                    "No GraphQL API answers at this host",
+                )
+            })?;
+        let credentials = Credentials {
+            authorization: header("authorization"),
+            api_key: header("x-api-key"),
+            account_id: req.account_id.clone(),
+            access_key_id: req.access_key_id.clone(),
+            source_ip: header("x-forwarded-for"),
+        };
+        let caller = match authenticate(&api, self.cognito.as_ref(), &credentials) {
+            Ok(caller) => caller,
+            Err(message) => {
+                return Ok(AwsResponse::json_value(
+                    StatusCode::UNAUTHORIZED,
+                    json!({ "errors": [{ "errorType": "UnauthorizedException", "message": message }] }),
+                ))
+            }
+        };
+        let Ok(body) = serde_json::from_slice::<Value>(&req.body) else {
+            return Ok(AwsResponse::json_value(
+                StatusCode::BAD_REQUEST,
+                json!({ "errors": [{ "errorType": "MalformedHttpRequestException", "message": "The request body is not JSON" }] }),
+            ));
+        };
+        let snapshot_for_run = api.clone();
+        let execution =
+            tokio::task::spawn_blocking(move || execute(&snapshot_for_run, &caller, &body))
+                .await
+                .map_err(|_| {
+                    AwsServiceError::aws_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "InternalFailureException",
+                        "The resolver run failed",
+                    )
+                })?;
+        self.realtime.publish(&api, &execution.published);
+        self.realtime
+            .invalidate(&api.api_id, &execution.invalidations);
+        Ok(AwsResponse::ok_json(execution.response))
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
@@ -381,6 +454,9 @@ impl AwsService for AppSyncService {
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        if req.method == http::Method::POST && req.raw_path == "/graphql" {
+            return self.graphql(&req).await;
+        }
         let Some((action, labels)) = Self::resolve_action(&req) else {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,

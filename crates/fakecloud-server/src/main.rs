@@ -7129,7 +7129,9 @@ async fn main() {
         } else {
             None
         };
-    let mut appsync_service = fakecloud_appsync::AppSyncService::new(appsync_state.clone());
+    let mut appsync_service = fakecloud_appsync::AppSyncService::new(appsync_state.clone())
+        .with_cognito(cognito_state.clone());
+    let appsync_realtime = appsync_service.realtime();
     if let Some(store) = appsync_snapshot_store {
         appsync_service = appsync_service.with_snapshot_store(store);
     }
@@ -13126,6 +13128,47 @@ async fn main() {
             })
         })
         .fallback(dispatch::dispatch)
+        // AppSync's realtime endpoint: a WebSocket upgrade addressed to
+        // `<apiId>.appsync-realtime-api.<region>...`, whatever its path.
+        .layer({
+            let realtime = appsync_realtime.clone();
+            let appsync_state = appsync_state.clone();
+            let cognito = cognito_state.clone();
+            let account_id = cli.account_id.clone();
+            axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let realtime = realtime.clone();
+                    let appsync_state = appsync_state.clone();
+                    let cognito = cognito.clone();
+                    let account_id = account_id.clone();
+                    async move {
+                        let api_id = request
+                            .headers()
+                            .get(axum::http::header::HOST)
+                            .and_then(|host| host.to_str().ok())
+                            .and_then(|host| fakecloud_appsync::data_plane::api_id_of_host(host, true));
+                        match api_id {
+                            Some(api_id) => {
+                                fakecloud_appsync::data_plane::realtime::upgrade(
+                                    request,
+                                    fakecloud_appsync::data_plane::realtime::SocketContext {
+                                        realtime,
+                                        state: appsync_state,
+                                        cognito: Some(cognito),
+                                        api_id,
+                                        account_id,
+                                        source_ip: None,
+                                        connection_headers: None,
+                                    },
+                                )
+                                .await
+                            }
+                            None => next.run(request).await,
+                        }
+                    }
+                },
+            )
+        })
         .layer({
             let registry_arc = Arc::new(registry);
             // Now that every service has been registered, give the

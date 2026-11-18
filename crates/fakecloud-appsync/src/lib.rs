@@ -38,6 +38,7 @@
 //! against the configured data sources -- is a later batch. This crate is the
 //! faithful control plane + schema state that such execution would build on.
 
+pub mod data_plane;
 pub mod evaluate;
 mod pagination_gen;
 pub mod persistence;

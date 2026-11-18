@@ -737,6 +737,19 @@ fn parse_aws_prefix(prefix: &str) -> Option<RoutingHost> {
         return host;
     }
 
+    // `<api-id>.appsync-api.<region>` — an AppSync GraphQL API's data plane,
+    // which callers reach with a Cognito or API-key credential and no SigV4
+    // scope to name the service.
+    if let [api_id, "appsync-api", region] = labels.as_slice() {
+        if !api_id.is_empty() {
+            return Some(RoutingHost {
+                service: "appsync".to_string(),
+                region: region.to_string(),
+                bucket: None,
+            });
+        }
+    }
+
     // `<service>.<region>` — the common case for every other service.
     match labels.as_slice() {
         [service, region] => Some(RoutingHost {
@@ -1881,6 +1894,18 @@ mod tests {
         assert_eq!(normalize_host("rest.example.com"), "rest.example.com");
         assert_eq!(normalize_host("[::1]:4566"), "[::1]");
         assert_eq!(normalize_host("localhost"), "localhost");
+    }
+
+    #[test]
+    fn parse_routing_host_appsync_data_plane_hosts() {
+        assert_eq!(
+            parse_routing_host("abc123.appsync-api.us-east-1.amazonaws.com"),
+            Some(RoutingHost {
+                service: "appsync".to_string(),
+                region: "us-east-1".to_string(),
+                bucket: None,
+            })
+        );
     }
 
     #[test]
