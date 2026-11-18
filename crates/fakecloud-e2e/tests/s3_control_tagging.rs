@@ -53,11 +53,12 @@ impl Intercept for ConnectLocally {
 }
 
 async fn s3control_client(server: &TestServer) -> aws_sdk_s3control::Client {
+    s3control_client_at(server, "s3-control.us-east-1.localhost.localstack.cloud").await
+}
+
+async fn s3control_client_at(server: &TestServer, host: &str) -> aws_sdk_s3control::Client {
     let conf = aws_sdk_s3control::config::Builder::from(&server.aws_config().await)
-        .endpoint_url(format!(
-            "http://s3-control.us-east-1.localhost.localstack.cloud:{}",
-            server.port()
-        ))
+        .endpoint_url(format!("http://{host}:{}", server.port()))
         .interceptor(ConnectLocally {
             port: server.port(),
         })
@@ -315,4 +316,36 @@ async fn s3control_tags_errors() {
         .unwrap_err();
     let svc = err.into_service_error();
     assert_eq!(svc.meta().code(), Some("InvalidRequest"), "{svc:?}");
+}
+
+/// A client pointed at fakecloud's plain endpoint (as `AWS_ENDPOINT_URL`
+/// sets for every service) still addresses `{AccountId}.localhost`, with no
+/// `s3-control` label; its `x-amz-account-id` header names the same account.
+#[tokio::test]
+async fn s3control_reaches_the_plain_endpoint_with_its_account_prefix() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    let control = s3control_client_at(&server, "localhost").await;
+    s3.create_bucket().bucket("plain").send().await.unwrap();
+    let arn = "arn:aws:s3:::plain";
+
+    control
+        .tag_resource()
+        .account_id(ACCOUNT)
+        .resource_arn(arn)
+        .tags(tag("env", "test"))
+        .send()
+        .await
+        .unwrap();
+    let listed = control
+        .list_tags_for_resource()
+        .account_id(ACCOUNT)
+        .resource_arn(arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        sorted(listed.tags()),
+        vec![("env".to_string(), "test".to_string())]
+    );
 }

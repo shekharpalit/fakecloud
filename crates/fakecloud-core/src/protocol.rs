@@ -484,20 +484,31 @@ pub fn parse_routing_host(host: &str) -> Option<RoutingHost> {
 /// `s3` handler, so the host is the only thing telling the two apart. The
 /// `s3-control` label must lead the host (after the SDK's account-ID
 /// prefix), so a bucket whose name merely contains `s3-control` stays S3.
+///
+/// A client given fakecloud's own endpoint (`AWS_ENDPOINT_URL`) for S3
+/// Control addresses `<account-id>.<endpoint host>`, with no `s3-control`
+/// label. Every S3 Control operation also sends its account in the
+/// `x-amz-account-id` header, which S3 never sends, so a host whose first
+/// label is that same account is S3 Control too.
 pub fn is_s3_control_host(headers: &HeaderMap) -> bool {
     let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) else {
         return false;
     };
     let hostname = host.split(':').next().unwrap_or("").to_ascii_lowercase();
     let labels: Vec<&str> = hostname.split('.').collect();
+    let is_account = |label: &str| label.len() == 12 && label.bytes().all(|b| b.is_ascii_digit());
     let control_label = match labels.as_slice() {
         ["s3-control", ..] => true,
-        [account, "s3-control", ..] => {
-            account.len() == 12 && account.bytes().all(|b| b.is_ascii_digit())
-        }
+        [account, "s3-control", ..] => is_account(account),
         _ => false,
     };
-    control_label && parse_routing_host(host).is_none_or(|h| h.bucket.is_none())
+    if control_label {
+        return parse_routing_host(host).is_none_or(|h| h.bucket.is_none());
+    }
+    let header_account = headers
+        .get("x-amz-account-id")
+        .and_then(|v| v.to_str().ok());
+    matches!(labels.as_slice(), [account, _, ..] if is_account(account) && header_account == Some(*account))
 }
 
 /// Normalize a `Host` header value for comparing against configured domain
@@ -1285,6 +1296,33 @@ mod tests {
         ));
         assert!(!is_control("a.s3-control.b.s3.us-east-1.amazonaws.com"));
         assert!(!is_control("localhost:4566"));
+    }
+
+    #[test]
+    fn s3_control_host_accepts_an_account_prefix_matching_its_header() {
+        let is_control = |host: &str, account: Option<&str>| {
+            let mut headers = HeaderMap::new();
+            headers.insert("host", host.parse().unwrap());
+            if let Some(account) = account {
+                headers.insert("x-amz-account-id", account.parse().unwrap());
+            }
+            is_s3_control_host(&headers)
+        };
+        assert!(is_control(
+            "123456789012.localhost:4566",
+            Some("123456789012")
+        ));
+        assert!(is_control(
+            "123456789012.fakecloud.internal",
+            Some("123456789012")
+        ));
+        assert!(!is_control("123456789012.localhost:4566", None));
+        assert!(!is_control(
+            "123456789012.localhost:4566",
+            Some("210987654321")
+        ));
+        assert!(!is_control("bucket.localhost:4566", Some("123456789012")));
+        assert!(!is_control("123456789012", Some("123456789012")));
     }
 
     #[test]
