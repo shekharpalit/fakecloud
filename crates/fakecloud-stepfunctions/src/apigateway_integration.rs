@@ -401,22 +401,23 @@ mod tests {
     use super::*;
     use fakecloud_core::service::{AwsService, AwsServiceError};
 
+    /// A recorded request: method, raw path, raw query, region, headers, body.
+    type SeenRequest = (
+        String,
+        String,
+        String,
+        String,
+        Vec<(String, String)>,
+        String,
+    );
+
     /// Records each request and answers with the configured status and body.
     struct RecordingGateway {
         status: StatusCode,
         body: &'static str,
         content_type: &'static str,
         fail: Option<(StatusCode, &'static str, &'static str)>,
-        seen: parking_lot::Mutex<
-            Vec<(
-                String,
-                String,
-                String,
-                String,
-                Vec<(String, String)>,
-                String,
-            )>,
-        >,
+        seen: parking_lot::Mutex<Vec<SeenRequest>>,
     }
 
     impl RecordingGateway {
