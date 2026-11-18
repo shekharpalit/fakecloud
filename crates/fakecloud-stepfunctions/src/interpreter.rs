@@ -169,7 +169,7 @@ fn assign_wait_variables(
     if crate::jsonata::is_jsonata(state_def) || state_def.get("Assign").is_none() {
         return Ok(());
     }
-    let effective = match state_def["InputPath"].as_str() {
+    let effective = match crate::io_processing::path_field(state_def, "InputPath") {
         Some("null") => json!({}),
         path => apply_input_path(input, path)?,
     };
@@ -456,8 +456,8 @@ fn finish_task_result(
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Result<Value, (String, String)> {
-    let result_path = state_def["ResultPath"].as_str();
-    let output_path = state_def["OutputPath"].as_str();
+    let result_path = crate::io_processing::path_field(state_def, "ResultPath");
+    let output_path = crate::io_processing::path_field(state_def, "OutputPath");
     let ctx = context_object(shared_state, execution_arn, name, entered, attempt);
     let selected = match state_def.get("ResultSelector") {
         Some(selector) => apply_parameters(selector, &result, Some(&ctx))?,
@@ -518,7 +518,7 @@ async fn execute_task_state(
     let resource = state_def["Resource"].as_str().unwrap_or("").to_string();
     let base_ctx = context_object(shared_state, execution_arn, name, entered, 0);
 
-    let input_path = state_def["InputPath"].as_str();
+    let input_path = crate::io_processing::path_field(state_def, "InputPath");
 
     let effective_input = if input_path == Some("null") {
         json!({})
@@ -867,9 +867,9 @@ async fn execute_parallel_state(
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Result<Value, StateFailure> {
-    let input_path = state_def["InputPath"].as_str();
-    let result_path = state_def["ResultPath"].as_str();
-    let output_path = state_def["OutputPath"].as_str();
+    let input_path = crate::io_processing::path_field(state_def, "InputPath");
+    let result_path = crate::io_processing::path_field(state_def, "ResultPath");
+    let output_path = crate::io_processing::path_field(state_def, "OutputPath");
 
     let effective_input = if input_path == Some("null") {
         json!({})
@@ -1113,8 +1113,12 @@ fn finish_map_output(
         Some(selector) => apply_parameters(selector, map_output, Some(ctx))?,
         None => map_output.clone(),
     };
-    let after_result = apply_result_path(input, &selected, state_def["ResultPath"].as_str())?;
-    let output = match state_def["OutputPath"].as_str() {
+    let after_result = apply_result_path(
+        input,
+        &selected,
+        crate::io_processing::path_field(state_def, "ResultPath"),
+    )?;
+    let output = match crate::io_processing::path_field(state_def, "OutputPath") {
         Some("null") => json!({}),
         output_path => apply_output_path(&after_result, output_path)?,
     };
@@ -1317,7 +1321,7 @@ async fn run_map_iterations(
         .and_then(|_| root_logging_configuration(shared_state, execution_arn))
         .map(Arc::new);
     let jsonata = crate::jsonata::is_jsonata(state_def);
-    let input_path = state_def["InputPath"].as_str();
+    let input_path = crate::io_processing::path_field(state_def, "InputPath");
 
     let effective_input = if input_path == Some("null") {
         json!({})
@@ -2380,6 +2384,7 @@ async fn invoke_resource(
             input,
             &account_id,
             timeout_seconds,
+            execution_principal(shared_state, execution_arn),
         )
         .await;
     }

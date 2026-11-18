@@ -61,6 +61,7 @@ struct Invocation {
     query: Vec<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
+    signed: bool,
 }
 
 /// Call the API the task's arguments name and shape the result as Step
@@ -70,12 +71,17 @@ pub(crate) async fn invoke(
     input: &Value,
     account_id: &str,
     timeout_seconds: Option<u64>,
+    principal: Option<fakecloud_core::auth::Principal>,
 ) -> Result<Value, TaskError> {
     let invocation = parse(input)?;
+    // `IAM_ROLE` and `RESOURCE_POLICY` sign the call with the execution's
+    // role; `NO_AUTH` (the default) sends it unsigned.
+    let principal = principal.filter(|_| invocation.signed);
     let service = registry.get("apigateway").ok_or_else(|| {
         invalid("API Gateway is not available for the apigateway:invoke integration")
     })?;
-    let request = invocation.into_request(account_id);
+    let mut request = invocation.into_request(account_id);
+    request.principal = principal;
     let call = service.handle(request);
     let outcome = match timeout_seconds {
         Some(seconds) => tokio::time::timeout(std::time::Duration::from_secs(seconds), call)
@@ -115,6 +121,7 @@ fn parse(input: &Value) -> Result<Invocation, TaskError> {
     let method = Method::from_bytes(method_name.as_bytes())
         .map_err(|_| invalid(format!("Invalid HTTP method '{method_name}'")))?;
 
+    let mut signed = false;
     if let Some(auth) = input.get("AuthType").filter(|v| !v.is_null()) {
         let auth = auth
             .as_str()
@@ -125,6 +132,7 @@ fn parse(input: &Value) -> Result<Invocation, TaskError> {
                 AUTH_TYPES.join(", ")
             )));
         }
+        signed = auth != "NO_AUTH";
     }
 
     let stage = optional_string(input, "Stage")?;
@@ -187,6 +195,7 @@ fn parse(input: &Value) -> Result<Invocation, TaskError> {
         query,
         headers,
         body,
+        signed,
     })
 }
 
@@ -418,6 +427,7 @@ mod tests {
         content_type: &'static str,
         fail: Option<(StatusCode, &'static str, &'static str)>,
         seen: parking_lot::Mutex<Vec<SeenRequest>>,
+        principals: parking_lot::Mutex<Vec<Option<String>>>,
     }
 
     impl RecordingGateway {
@@ -428,6 +438,7 @@ mod tests {
                 content_type: "application/json",
                 fail: None,
                 seen: parking_lot::Mutex::new(Vec::new()),
+                principals: parking_lot::Mutex::new(Vec::new()),
             })
         }
     }
@@ -439,6 +450,9 @@ mod tests {
         }
 
         async fn handle(&self, request: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+            self.principals
+                .lock()
+                .push(request.principal.as_ref().map(|p| p.arn.clone()));
             let headers = request
                 .headers
                 .iter()
@@ -480,7 +494,7 @@ mod tests {
             .enable_time()
             .build()
             .unwrap()
-            .block_on(invoke(&registry, &input, "123456789012", None))
+            .block_on(invoke(&registry, &input, "123456789012", None, None))
     }
 
     #[test]
@@ -523,6 +537,43 @@ mod tests {
         assert!(headers.contains(&("x-trace".to_string(), "t1".to_string())));
         assert!(headers.contains(&("content-type".to_string(), "application/json".to_string())));
         assert_eq!(body, r#"{"check":{"id":7}}"#);
+    }
+
+    #[test]
+    fn iam_role_auth_signs_as_the_execution_role_and_no_auth_does_not() {
+        let principal = fakecloud_core::auth::Principal {
+            arn: "arn:aws:sts::123456789012:assumed-role/workflow/exec-1".to_string(),
+            user_id: "AROAEXAMPLE:exec-1".to_string(),
+            account_id: "123456789012".to_string(),
+            principal_type: fakecloud_core::auth::PrincipalType::AssumedRole,
+            source_identity: None,
+            tags: None,
+        };
+        let gateway = RecordingGateway::answering(StatusCode::OK, "{}");
+        let registry = registry_with(gateway.clone());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        for auth in ["IAM_ROLE", "NO_AUTH"] {
+            let input = json!({"ApiEndpoint": "abc.execute-api.us-east-1.amazonaws.com", "Method": "GET", "AuthType": auth});
+            runtime
+                .block_on(invoke(
+                    &registry,
+                    &input,
+                    "123456789012",
+                    None,
+                    Some(principal.clone()),
+                ))
+                .unwrap();
+        }
+        assert_eq!(
+            *gateway.principals.lock(),
+            vec![
+                Some("arn:aws:sts::123456789012:assumed-role/workflow/exec-1".to_string()),
+                None
+            ]
+        );
     }
 
     #[test]
@@ -573,6 +624,7 @@ mod tests {
                 "Missing Authentication Token",
             )),
             seen: parking_lot::Mutex::new(Vec::new()),
+            principals: parking_lot::Mutex::new(Vec::new()),
         });
         let error = run(
             gateway,
@@ -596,6 +648,7 @@ mod tests {
             content_type: "text/plain",
             fail: None,
             seen: parking_lot::Mutex::new(Vec::new()),
+            principals: parking_lot::Mutex::new(Vec::new()),
         });
         let output = run(
             gateway,

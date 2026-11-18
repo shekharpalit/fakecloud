@@ -36,6 +36,13 @@ impl StepFunctionsService {
 
         let mut accounts = self.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
+        // A published version's ARN (`...:stateMachine:<name>:<n>`) starts the
+        // state machine it was published from.
+        let base_arn = state
+            .state_machine_versions
+            .get(sm_arn)
+            .map_or_else(|| sm_arn.to_string(), |v| v.state_machine_arn.clone());
+        let sm_arn = base_arn.as_str();
         let sm = state
             .state_machines
             .get(sm_arn)

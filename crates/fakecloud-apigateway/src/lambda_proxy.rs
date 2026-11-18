@@ -124,6 +124,22 @@ pub fn construct_event(
     })
 }
 
+/// The caller of an `AWS_IAM` method, as API Gateway reports it in
+/// `requestContext.identity`: its account, its unique id (`caller`, `user`),
+/// its ARN and the access key it signed with. Unsigned requests keep the
+/// null identity.
+pub fn set_iam_identity(event: &mut serde_json::Value, req: &AwsRequest) {
+    let Some(principal) = &req.principal else {
+        return;
+    };
+    let identity = &mut event["requestContext"]["identity"];
+    identity["accountId"] = json!(principal.account_id);
+    identity["caller"] = json!(principal.user_id);
+    identity["user"] = json!(principal.user_id);
+    identity["userArn"] = json!(principal.arn);
+    identity["accessKey"] = json!(req.access_key_id);
+}
+
 fn encode_body(req: &AwsRequest, binary_media_types: &[String]) -> (bool, Option<String>) {
     if req.body.is_empty() {
         return (false, None);
@@ -376,6 +392,54 @@ mod tests {
             access_key_id: None,
             principal: None,
         }
+    }
+
+    #[test]
+    fn an_iam_method_reports_the_signing_principal() {
+        let mut signed = req();
+        signed.access_key_id = Some("ASIAEXAMPLE".to_string());
+        signed.principal = Some(fakecloud_core::auth::Principal {
+            arn: "arn:aws:sts::000000000000:assumed-role/workflow/exec-1".to_string(),
+            user_id: "AROAEXAMPLE:exec-1".to_string(),
+            account_id: "000000000000".to_string(),
+            principal_type: fakecloud_core::auth::PrincipalType::AssumedRole,
+            source_identity: None,
+            tags: None,
+        });
+        let mut event = construct_event(
+            &signed,
+            "api",
+            "prod",
+            "/pets",
+            "/pets",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            &[],
+        );
+        set_iam_identity(&mut event, &signed);
+        let identity = &event["requestContext"]["identity"];
+        assert_eq!(
+            identity["userArn"],
+            "arn:aws:sts::000000000000:assumed-role/workflow/exec-1"
+        );
+        assert_eq!(identity["caller"], "AROAEXAMPLE:exec-1");
+        assert_eq!(identity["accountId"], "000000000000");
+        assert_eq!(identity["accessKey"], "ASIAEXAMPLE");
+        let mut unsigned = construct_event(
+            &req(),
+            "api",
+            "prod",
+            "/pets",
+            "/pets",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            &[],
+        );
+        set_iam_identity(&mut unsigned, &req());
+        assert_eq!(
+            unsigned["requestContext"]["identity"]["userArn"],
+            serde_json::Value::Null
+        );
     }
 
     #[test]

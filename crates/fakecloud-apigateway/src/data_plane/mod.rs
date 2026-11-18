@@ -471,6 +471,9 @@ pub async fn handle(
             if let Some(out) = &auth_outcome {
                 inject_authorizer_into_event(&mut event, out);
             }
+            if authorization_type == "AWS_IAM" {
+                lambda_proxy::set_iam_identity(&mut event, req);
+            }
             let delivery = service
                 .delivery()
                 .ok_or_else(|| bad_gateway("Lambda delivery not configured"))?;

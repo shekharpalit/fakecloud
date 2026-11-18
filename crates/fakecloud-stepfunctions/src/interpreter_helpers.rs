@@ -666,8 +666,8 @@ pub(crate) fn run_succeed_state(
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    let input_path = state_def["InputPath"].as_str();
-    let output_path = state_def["OutputPath"].as_str();
+    let input_path = crate::io_processing::path_field(state_def, "InputPath");
+    let output_path = crate::io_processing::path_field(state_def, "OutputPath");
 
     let processed = if input_path == Some("null") {
         json!({})
@@ -781,7 +781,7 @@ pub(crate) fn run_choice_state(
     shared_state: &SharedStepFunctionsState,
     execution_arn: &str,
 ) -> Advance {
-    let input_path = state_def["InputPath"].as_str();
+    let input_path = crate::io_processing::path_field(state_def, "InputPath");
     let processed_input = if input_path == Some("null") {
         json!({})
     } else {
@@ -801,7 +801,7 @@ pub(crate) fn run_choice_state(
             // A Choice state has no Parameters/ResultPath, so its effective
             // result is the InputPath-filtered input; OutputPath then filters
             // what flows to the next state.
-            let output_path = state_def["OutputPath"].as_str();
+            let output_path = crate::io_processing::path_field(state_def, "OutputPath");
             let output = if output_path == Some("null") {
                 json!({})
             } else {
@@ -846,9 +846,9 @@ pub(crate) fn execute_pass_state(
     input: &Value,
     context: Option<&Value>,
 ) -> Result<Value, (String, String)> {
-    let input_path = state_def["InputPath"].as_str();
-    let result_path = state_def["ResultPath"].as_str();
-    let output_path = state_def["OutputPath"].as_str();
+    let input_path = crate::io_processing::path_field(state_def, "InputPath");
+    let result_path = crate::io_processing::path_field(state_def, "ResultPath");
+    let output_path = crate::io_processing::path_field(state_def, "OutputPath");
 
     let effective_input = if input_path == Some("null") {
         json!({})

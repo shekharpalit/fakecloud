@@ -33,6 +33,18 @@ pub fn apply_output_path(output: &Value, path: Option<&str>) -> Result<Value, St
 ///
 /// A path that walks into a value that can't hold its next step (`$.a.b` with
 /// `a: 1`) fails with `States.ReferencePathConflict`, as recorded.
+/// A state's `InputPath`, `ResultPath` or `OutputPath`. JSON `null` is a
+/// value with its own meaning (no input, discard the result, no output), which
+/// the string `"null"` carries through the path functions here; an absent
+/// field is `None`, the default `$`.
+pub fn path_field<'a>(state_def: &'a Value, field: &str) -> Option<&'a str> {
+    match state_def.get(field) {
+        Some(Value::Null) => Some("null"),
+        Some(value) => value.as_str(),
+        None => None,
+    }
+}
+
 pub fn apply_result_path(
     input: &Value,
     result: &Value,
@@ -209,6 +221,20 @@ fn set_at_path(root: &Value, path: &str, value: &Value) -> Result<Value, StatesE
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_json_null_path_means_null_and_a_missing_one_means_the_default() {
+        let state = json!({ "ResultPath": null, "OutputPath": "$.x" });
+        assert_eq!(path_field(&state, "ResultPath"), Some("null"));
+        assert_eq!(path_field(&state, "OutputPath"), Some("$.x"));
+        assert_eq!(path_field(&state, "InputPath"), None);
+        let input = json!({ "command": { "id": 1 } });
+        assert_eq!(
+            apply_result_path(&input, &json!({ "r": 2 }), path_field(&state, "ResultPath"))
+                .unwrap(),
+            input
+        );
+    }
 
     #[test]
     fn test_resolve_path_root() {

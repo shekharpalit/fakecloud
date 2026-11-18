@@ -2804,6 +2804,39 @@ mod tests {
     // ── StartExecution ──
 
     #[tokio::test]
+    async fn start_execution_accepts_a_published_version_arn() {
+        let svc = StepFunctionsService::new(make_state());
+        let body = json!({
+            "name": "versioned-sm",
+            "definition": VALID_DEF,
+            "roleArn": "arn:aws:iam::123456789012:role/r",
+            "publish": true,
+        });
+        let created = body_json(
+            &svc.create_state_machine(&make_request("CreateStateMachine", &body.to_string()))
+                .unwrap(),
+        );
+        let version_arn = created["stateMachineVersionArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let started = svc
+            .start_execution(&make_request(
+                "StartExecution",
+                &json!({ "stateMachineArn": version_arn }).to_string(),
+            ))
+            .unwrap();
+        assert!(body_json(&started)["executionArn"]
+            .as_str()
+            .unwrap()
+            .contains(":execution:versioned-sm:"));
+        let missing = json!({ "stateMachineArn": format!("{}:9", created["stateMachineArn"].as_str().unwrap()) });
+        assert!(svc
+            .start_execution(&make_request("StartExecution", &missing.to_string()))
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn start_execution_basic() {
         let svc = StepFunctionsService::new(make_state());
         let arn = create_sm(&svc, "exec-sm");
