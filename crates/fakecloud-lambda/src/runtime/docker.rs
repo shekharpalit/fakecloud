@@ -128,6 +128,8 @@ impl DockerBackend {
         let target = self.runtime_api_target().await;
         cmd.arg("--add-host")
             .arg(format!("{}:{target}", runtime_api.host));
+        cmd.args(fakecloud_core::container_net::workload_extra_host_argv());
+        cmd.args(fakecloud_core::container_net::workload_ca_bundle_argv());
     }
 
     /// The address the host alias names inside a container. When the engine

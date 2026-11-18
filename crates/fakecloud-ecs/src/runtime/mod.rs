@@ -1863,6 +1863,7 @@ pub(crate) fn build_run_argv(
         let suffix = if vm.read_only { ":ro" } else { "" };
         argv.push(format!("{}:{}{}", vm.source, vm.container_path, suffix));
     }
+    argv.extend(fakecloud_core::container_net::workload_ca_bundle_argv());
     if plan.host_namespaces.pid {
         argv.push("--pid".into());
         argv.push("host".into());

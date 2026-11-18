@@ -712,6 +712,82 @@ impl HostNetworking {
     }
 }
 
+/// `name:address` pairs (comma-separated) every workload container fakecloud
+/// starts resolves through `--add-host`: how a workload reaches a TLS front for
+/// fakecloud by the real AWS hostname an SDK or a configured URL uses.
+pub const CONTAINER_HOSTS_ENV: &str = "FAKECLOUD_CONTAINER_HOSTS";
+/// A file of `name address` lines (as `/etc/hosts` writes them), read each
+/// time a workload container starts, so names created after fakecloud started
+/// (an API's generated id) can be added while it runs.
+pub const CONTAINER_HOSTS_FILE_ENV: &str = "FAKECLOUD_CONTAINER_HOSTS_FILE";
+/// A PEM bundle on the host that every workload container trusts: mounted
+/// read-only at [`CONTAINER_CA_PATH`] and named by the variables common TLS
+/// stacks read.
+pub const CONTAINER_CA_BUNDLE_ENV: &str = "FAKECLOUD_CONTAINER_CA_BUNDLE";
+/// Where [`CONTAINER_CA_BUNDLE_ENV`]'s bundle appears inside a container.
+pub const CONTAINER_CA_PATH: &str = "/etc/fakecloud/ca-bundle.pem";
+const CA_VARIABLES: [&str; 5] = [
+    "SSL_CERT_FILE",
+    "AWS_CA_BUNDLE",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+];
+
+/// The `--add-host` pairs [`CONTAINER_HOSTS_ENV`] names in `hosts`.
+pub fn extra_host_argv(hosts: Option<&str>) -> Vec<String> {
+    hosts
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| entry.contains(':'))
+        .flat_map(|entry| ["--add-host".to_string(), entry.to_string()])
+        .collect()
+}
+
+/// The mount and variables that make a container trust `ca_bundle`.
+pub fn ca_bundle_argv(ca_bundle: Option<&str>) -> Vec<String> {
+    let Some(path) = ca_bundle.map(str::trim).filter(|p| !p.is_empty()) else {
+        return Vec::new();
+    };
+    let mut argv = vec!["-v".to_string(), format!("{path}:{CONTAINER_CA_PATH}:ro")];
+    for variable in CA_VARIABLES {
+        argv.push("-e".to_string());
+        argv.push(format!("{variable}={CONTAINER_CA_PATH}"));
+    }
+    argv
+}
+
+/// The `name:address` pairs of a hosts file's `name address` lines; blank
+/// lines and `#` comments are skipped.
+pub fn hosts_file_pairs(contents: &str) -> String {
+    contents
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or("").trim())
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some(format!("{}:{}", fields.next()?, fields.next()?))
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// [`extra_host_argv`] from the process environment and the hosts file it names.
+pub fn workload_extra_host_argv() -> Vec<String> {
+    let mut argv = extra_host_argv(std::env::var(CONTAINER_HOSTS_ENV).ok().as_deref());
+    if let Ok(path) = std::env::var(CONTAINER_HOSTS_FILE_ENV) {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            argv.extend(extra_host_argv(Some(&hosts_file_pairs(&contents))));
+        }
+    }
+    argv
+}
+
+/// [`ca_bundle_argv`] from the process environment.
+pub fn workload_ca_bundle_argv() -> Vec<String> {
+    ca_bundle_argv(std::env::var(CONTAINER_CA_BUNDLE_ENV).ok().as_deref())
+}
+
 /// How long to wait for the blocking `getaddrinfo` in [`host_alias_resolves`]
 /// before giving up and returning `false`. `getaddrinfo` has no timeout of its
 /// own, and a slow or unreachable DNS server would otherwise block a runtime
@@ -1459,6 +1535,39 @@ mod tests {
         assert!(!pid_alive(0));
         assert!(!pid_alive(u32::MAX));
         assert!(!pid_alive(u32::MAX - 1));
+    }
+
+    #[test]
+    fn workload_trust_arguments_follow_the_operator_settings() {
+        assert_eq!(
+            extra_host_argv(Some(
+                "a.example.com:127.0.0.1, b.example.com:host-gateway,,bad"
+            )),
+            vec![
+                "--add-host",
+                "a.example.com:127.0.0.1",
+                "--add-host",
+                "b.example.com:host-gateway"
+            ]
+        );
+        assert!(extra_host_argv(None).is_empty());
+        assert_eq!(
+            hosts_file_pairs(
+                "# comment\na.example.com host-gateway\n\nb.example.com 10.0.0.1 # note\nlonely\n"
+            ),
+            "a.example.com:host-gateway,b.example.com:10.0.0.1"
+        );
+        let ca = ca_bundle_argv(Some("/tmp/bundle.pem"));
+        assert_eq!(
+            ca[..2],
+            [
+                "-v".to_string(),
+                format!("/tmp/bundle.pem:{CONTAINER_CA_PATH}:ro")
+            ]
+        );
+        assert!(ca.contains(&format!("SSL_CERT_FILE={CONTAINER_CA_PATH}")));
+        assert!(ca.contains(&format!("NODE_EXTRA_CA_CERTS={CONTAINER_CA_PATH}")));
+        assert!(ca_bundle_argv(Some(" ")).is_empty());
     }
 
     #[test]

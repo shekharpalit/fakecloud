@@ -278,6 +278,7 @@ pub(crate) fn namespace_network_argv(
         argv.push("--add-host".into());
         argv.push(arg.to_string());
     }
+    argv.extend(fakecloud_core::container_net::workload_extra_host_argv());
     let use_awsvpc_network = plan.network_mode.as_deref() == Some("awsvpc") && awsvpc_network_ready;
     if use_awsvpc_network {
         argv.push("--network".into());
