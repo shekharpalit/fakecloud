@@ -1296,6 +1296,23 @@ impl BatchService {
                 }
             }
         }
+        // `Ref::<name>` in the command takes the job's parameter `<name>`: the
+        // submit's parameters override the job definition's defaults.
+        let mut parameters = jd
+            .get("parameters")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(submitted) = submit_body.get("parameters").and_then(Value::as_object) {
+            parameters.extend(submitted.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        if let Some(command) = container.get_mut("command").and_then(Value::as_array_mut) {
+            for argument in command.iter_mut() {
+                if let Some(text) = argument.as_str() {
+                    *argument = json!(substitute_parameters(text, &parameters));
+                }
+            }
+        }
         Some(Value::Object(container))
     }
 
@@ -1900,20 +1917,26 @@ async fn launch_ecs_task(
     // An array child's index travels as a RunTask container override, as on
     // AWS Batch, so every child of a job shares one task definition revision.
     let (container_def, overrides) = task_definition_container(container);
+    let overrides = Some(with_job_id(overrides, job_id));
+    let roles = task_definition_roles(container);
     let family = format!("batch-{job_name}");
     let task_def_arn =
-        match latest_matching_task_definition(ecs, src, &family, &container_def).await {
+        match latest_matching_task_definition(ecs, src, &family, &container_def, &roles).await {
             Some(arn) => arn,
             None => {
+                let mut registration = json!({
+                    "family": family,
+                    "containerDefinitions": [container_def],
+                    "networkMode": "bridge",
+                    "requiresCompatibilities": ["EC2"],
+                });
+                for (key, value) in &roles {
+                    registration[*key] = json!(value);
+                }
                 let reg = ecs
                     .handle_deferring_snapshot(ecs_request(
                         "RegisterTaskDefinition",
-                        json!({
-                            "family": family,
-                            "containerDefinitions": [container_def],
-                            "networkMode": "bridge",
-                            "requiresCompatibilities": ["EC2"],
-                        }),
+                        registration,
                         src,
                     ))
                     .await?;
@@ -1947,6 +1970,67 @@ async fn launch_ecs_task(
     Ok((cluster, task_arn))
 }
 
+/// The per-job container override with `AWS_BATCH_JOB_ID`, which AWS Batch
+/// sets in every job's container (an array child's id is `<parent>:<index>`).
+/// It travels as a RunTask override so every job shares one task definition
+/// revision.
+fn with_job_id(overrides: Option<Value>, job_id: &str) -> Value {
+    let mut overrides =
+        overrides.unwrap_or_else(|| json!({ "name": "default", "environment": [] }));
+    if let Some(environment) = overrides
+        .as_object_mut()
+        .map(|o| o.entry("environment").or_insert_with(|| json!([])))
+        .and_then(Value::as_array_mut)
+    {
+        environment.push(json!({ "name": "AWS_BATCH_JOB_ID", "value": job_id }));
+    }
+    overrides
+}
+
+/// `text` with each `Ref::<name>` whose parameter exists replaced by its value;
+/// a reference to an undefined parameter stays as written, as on AWS Batch.
+fn substitute_parameters(text: &str, parameters: &serde_json::Map<String, Value>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("Ref::") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 5..];
+        let end = after
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .unwrap_or(after.len());
+        let name = &after[..end];
+        match parameters.get(name).and_then(Value::as_str) {
+            Some(value) if !name.is_empty() => out.push_str(value),
+            _ => {
+                out.push_str("Ref::");
+                out.push_str(name);
+            }
+        }
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The task definition roles a job's container properties name: its job role
+/// is the task's role (the credentials the container's SDKs get) and its
+/// execution role pulls the image and reads the container's `secrets`.
+fn task_definition_roles(container: &Value) -> Vec<(&'static str, String)> {
+    [
+        ("taskRoleArn", "jobRoleArn"),
+        ("executionRoleArn", "executionRoleArn"),
+    ]
+    .into_iter()
+    .filter_map(|(task_key, job_key)| {
+        container
+            .get(job_key)
+            .and_then(Value::as_str)
+            .filter(|arn| !arn.is_empty())
+            .map(|arn| (task_key, arn.to_string()))
+    })
+    .collect()
+}
+
 /// Split a job's container properties into the ECS container definition the
 /// job definition maps to and the per-job RunTask container override (the
 /// array index, which differs per child and must not mint a revision each).
@@ -1961,6 +2045,13 @@ fn task_definition_container(container: &Value) -> (Value, Option<Value>) {
     cdef.insert("memory".into(), json!(memory));
     if let Some(cmd) = container.get("command").filter(|v| v.is_array()) {
         cdef.insert("command".into(), cmd.clone());
+    }
+    // `secrets` (Secrets Manager and SSM references the execution role reads at
+    // start) and `logConfiguration` have the same shape in both services.
+    for key in ["secrets", "logConfiguration"] {
+        if let Some(value) = container.get(key).filter(|v| !v.is_null()) {
+            cdef.insert(key.into(), value.clone());
+        }
     }
     let mut per_job = Vec::new();
     if let Some(env) = container.get("environment").and_then(Value::as_array) {
@@ -1985,6 +2076,7 @@ async fn latest_matching_task_definition(
     src: &AwsRequest,
     family: &str,
     container_def: &Value,
+    roles: &[(&'static str, String)],
 ) -> Option<String> {
     let resp = ecs
         .handle_deferring_snapshot(ecs_request(
@@ -1998,18 +2090,40 @@ async fn latest_matching_task_definition(
     if td.get("status").and_then(Value::as_str) != Some("ACTIVE") {
         return None;
     }
+    let same_roles = ["taskRoleArn", "executionRoleArn"].iter().all(|key| {
+        let want = roles
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, arn)| arn.as_str());
+        td.get(*key)
+            .and_then(Value::as_str)
+            .filter(|arn| !arn.is_empty())
+            == want
+    });
+    if !same_roles {
+        return None;
+    }
     let existing = td.pointer("/containerDefinitions/0")?;
-    let same = ["name", "image", "cpu", "memory", "command", "environment"]
-        .iter()
-        .all(|k| {
-            let want = container_def.get(*k);
-            let have = existing.get(*k);
-            match (want, have) {
-                (None, None) => true,
-                (None, Some(v)) => v.as_array().is_some_and(|a| a.is_empty()),
-                (Some(w), h) => Some(w) == h,
-            }
-        });
+    let same = [
+        "name",
+        "image",
+        "cpu",
+        "memory",
+        "command",
+        "environment",
+        "secrets",
+        "logConfiguration",
+    ]
+    .iter()
+    .all(|k| {
+        let want = container_def.get(*k);
+        let have = existing.get(*k);
+        match (want, have) {
+            (None, None) => true,
+            (None, Some(v)) => v.as_array().is_some_and(|a| a.is_empty()),
+            (Some(w), h) => Some(w) == h,
+        }
+    });
     if !same {
         return None;
     }
@@ -2540,6 +2654,70 @@ impl AwsService for BatchService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_job_container_is_told_its_job_id() {
+        assert_eq!(
+            with_job_id(None, "job-1"),
+            json!({ "name": "default", "environment": [{ "name": "AWS_BATCH_JOB_ID", "value": "job-1" }] })
+        );
+        let child = json!({ "name": "default", "environment": [{ "name": "AWS_BATCH_JOB_ARRAY_INDEX", "value": "2" }] });
+        assert_eq!(
+            with_job_id(Some(child), "job-1:2")["environment"],
+            json!([{ "name": "AWS_BATCH_JOB_ARRAY_INDEX", "value": "2" }, { "name": "AWS_BATCH_JOB_ID", "value": "job-1:2" }])
+        );
+    }
+
+    #[test]
+    fn command_references_take_the_job_parameters() {
+        let parameters = json!({"study": "s-1", "attempt": "a-2"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(substitute_parameters("Ref::study", &parameters), "s-1");
+        assert_eq!(
+            substitute_parameters("--id=Ref::attempt/x", &parameters),
+            "--id=a-2/x"
+        );
+        assert_eq!(
+            substitute_parameters("Ref::missing", &parameters),
+            "Ref::missing"
+        );
+        assert_eq!(substitute_parameters("plain", &parameters), "plain");
+    }
+
+    #[test]
+    fn a_job_container_keeps_its_secrets_logging_and_roles_on_the_task() {
+        let container = json!({
+            "image": "repo/worker@sha256:abc",
+            "command": ["study"],
+            "resourceRequirements": [{"type": "VCPU", "value": "1"}, {"type": "MEMORY", "value": "2048"}],
+            "secrets": [{"name": "EE_DATABASE__URL", "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:common:worker_database_url::"}],
+            "logConfiguration": {"logDriver": "awslogs", "options": {"awslogs-group": "/aws/batch/x"}},
+            "jobRoleArn": "arn:aws:iam::123456789012:role/job",
+            "executionRoleArn": "arn:aws:iam::123456789012:role/execution",
+        });
+        let (definition, _) = task_definition_container(&container);
+        assert_eq!(definition["secrets"], container["secrets"]);
+        assert_eq!(
+            definition["logConfiguration"],
+            container["logConfiguration"]
+        );
+        assert_eq!(
+            task_definition_roles(&container),
+            vec![
+                (
+                    "taskRoleArn",
+                    "arn:aws:iam::123456789012:role/job".to_string()
+                ),
+                (
+                    "executionRoleArn",
+                    "arn:aws:iam::123456789012:role/execution".to_string()
+                ),
+            ]
+        );
+        assert!(task_definition_roles(&json!({"image": "x"})).is_empty());
+    }
     use crate::state::BatchAccounts;
     use parking_lot::RwLock;
     use std::collections::HashMap;
