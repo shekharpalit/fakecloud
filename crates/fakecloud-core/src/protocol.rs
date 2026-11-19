@@ -57,6 +57,7 @@ const REST_JSON_SERVICES: &[&str] = &[
     "bedrock",
     "bedrock-agent",
     "bedrock-agent-runtime",
+    "bedrock-agentcore",
     "scheduler",
     "batch",
     "pipes",
@@ -438,6 +439,8 @@ const LOCALSTACK_SUFFIX: &str = ".localhost.localstack.cloud";
 fn host_label_service(label: &str) -> String {
     match label {
         "email" => "ses".to_string(),
+        // AgentCore's control plane signs as `bedrock-agentcore`, like its data plane.
+        "bedrock-agentcore-control" => "bedrock-agentcore".to_string(),
         other => other.to_string(),
     }
 }

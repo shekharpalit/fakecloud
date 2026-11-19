@@ -7139,6 +7139,31 @@ async fn main() {
         cfn_snapshot_hooks.insert("appsync", h);
     }
     registry.register(Arc::new(appsync_service));
+    let agentcore_host = fakecloud_core::container_net::detect_container_cli().map(|engine| {
+        let net = fakecloud_core::container_net::HostNetworking::detect(&engine);
+        fakecloud_bedrock_agentcore::sessions::RuntimeHost {
+            cli: engine,
+            host_alias_arg: net.add_host_arg.clone(),
+            sibling_host: net.sibling_host.clone(),
+            endpoint_url: format!("http://{}:{}", net.host_alias, bound_addr.port()),
+            s3: Some(s3_delivery_for_logs.clone() as Arc<dyn fakecloud_core::delivery::S3Delivery>),
+            credentials: Some(
+                fakecloud_iam::sts_service::container_creds::IamSessionCredentialIssuer::shared(
+                    iam_state.clone(),
+                    cli.account_id.clone(),
+                ),
+            ),
+            cognito: Some(cognito_state.clone()),
+        }
+    });
+    let agentcore_engine = agentcore_host.as_ref().map(|host| host.cli.clone());
+    registry.register(Arc::new(
+        fakecloud_bedrock_agentcore::AgentCoreService::new(
+            fakecloud_bedrock_agentcore::new_state(&cli.account_id, &cli.region, &endpoint_url),
+            fakecloud_bedrock_agentcore::sessions::Sessions::new(agentcore_host),
+            fakecloud_bedrock_agentcore::interpreter::Interpreters::new(agentcore_engine),
+        ),
+    ));
 
     let amplify_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

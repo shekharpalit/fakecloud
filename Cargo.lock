@@ -4238,6 +4238,7 @@ dependencies = [
  "fakecloud-bedrock",
  "fakecloud-bedrock-agent",
  "fakecloud-bedrock-agent-runtime",
+ "fakecloud-bedrock-agentcore",
  "fakecloud-ce",
  "fakecloud-cloudcontrol",
  "fakecloud-cloudformation",
@@ -4742,6 +4743,32 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "fakecloud-bedrock-agentcore"
+version = "0.52.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "crc32fast",
+ "fakecloud-aws",
+ "fakecloud-cognito",
+ "fakecloud-core",
+ "http 1.4.0",
+ "parking_lot",
+ "percent-encoding",
+ "rand 0.8.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zip",
 ]
 
 [[package]]

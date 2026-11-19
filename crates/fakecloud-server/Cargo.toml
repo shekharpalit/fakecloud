@@ -56,6 +56,7 @@ fakecloud-kafka = { workspace = true }
 fakecloud-mwaa = { workspace = true }
 fakecloud-xray = { workspace = true }
 fakecloud-appsync = { workspace = true }
+fakecloud-bedrock-agentcore = { workspace = true }
 fakecloud-eks = { workspace = true }
 fakecloud-glacier = { workspace = true }
 fakecloud-appconfig = { workspace = true }
