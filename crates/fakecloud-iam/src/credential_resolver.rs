@@ -155,6 +155,7 @@ mod tests {
         state.sts_temp_credentials.insert(
             "FSIATEMP".to_string(),
             StsTempCredential {
+                session_tags: Default::default(),
                 access_key_id: "FSIATEMP".into(),
                 secret_access_key: "temp-secret".into(),
                 session_token: "temp-token".into(),
@@ -192,6 +193,7 @@ mod tests {
         state.sts_temp_credentials.insert(
             "FSIAZERO".to_string(),
             StsTempCredential {
+                session_tags: Default::default(),
                 access_key_id: "FSIAZERO".into(),
                 secret_access_key: "s".into(),
                 session_token: "t".into(),
@@ -353,6 +355,7 @@ mod tests {
         state.sts_temp_credentials.insert(
             "FSIAOPS".to_string(),
             StsTempCredential {
+                session_tags: Default::default(),
                 access_key_id: "FSIAOPS".into(),
                 secret_access_key: "ops-secret".into(),
                 session_token: "ops-token".into(),

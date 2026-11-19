@@ -248,6 +248,10 @@ pub struct StsTempCredential {
     /// GetSessionToken / GetFederationToken.
     #[serde(default)]
     pub federated_provider: Option<String>,
+    /// Session tags the `AssumeRole` call passed (`Tags.member.N`): the
+    /// session's `aws:PrincipalTag/<key>` values, over the role's own tags.
+    #[serde(default)]
+    pub session_tags: BTreeMap<String, String>,
     /// For a role session, the IAM ARN (path included) of the role it
     /// assumed, recorded when the session is minted: the session's
     /// `aws:PrincipalArn`, which it keeps whether or not the role exists
@@ -616,7 +620,10 @@ impl IamState {
         let now = Utc::now();
         if let Some(temp) = self.sts_temp_credentials.get(access_key_id) {
             if temp.expiration > now {
-                let principal_tags = self.resolve_role_tags(&temp.principal_arn);
+                let principal_tags = with_session_tags(
+                    self.resolve_role_tags(&temp.principal_arn),
+                    &temp.session_tags,
+                );
                 return Some(SecretLookup {
                     secret_access_key: temp.secret_access_key.clone(),
                     session_token: Some(temp.session_token.clone()),
@@ -705,7 +712,10 @@ impl IamState {
         if temp.expiration <= now {
             return None;
         }
-        let principal_tags = self.resolve_role_tags(&temp.principal_arn);
+        let principal_tags = with_session_tags(
+            self.resolve_role_tags(&temp.principal_arn),
+            &temp.session_tags,
+        );
         Some(SecretLookup {
             secret_access_key: temp.secret_access_key.clone(),
             session_token: Some(temp.session_token.clone()),
@@ -825,6 +835,19 @@ pub fn oidc_url_parts(url: &str) -> (String, String) {
     (without_scheme.to_string(), for_arn.to_string())
 }
 
+/// A session's principal tags: its role's tags with the session's own tags over them.
+fn with_session_tags(
+    role_tags: Option<BTreeMap<String, String>>,
+    session_tags: &BTreeMap<String, String>,
+) -> Option<BTreeMap<String, String>> {
+    if session_tags.is_empty() {
+        return role_tags;
+    }
+    let mut tags = role_tags.unwrap_or_default();
+    tags.extend(session_tags.iter().map(|(k, v)| (k.clone(), v.clone())));
+    Some(tags)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -891,6 +914,7 @@ mod tests {
         state.sts_temp_credentials.insert(
             "FSIATEMPKEY".to_string(),
             StsTempCredential {
+                session_tags: Default::default(),
                 access_key_id: "FSIATEMPKEY".to_string(),
                 secret_access_key: "temp-secret".to_string(),
                 session_token: "temp-token".to_string(),
@@ -921,6 +945,7 @@ mod tests {
         state.sts_temp_credentials.insert(
             "FSIAOLD".to_string(),
             StsTempCredential {
+                session_tags: Default::default(),
                 access_key_id: "FSIAOLD".to_string(),
                 secret_access_key: "s".to_string(),
                 session_token: "t".to_string(),
@@ -943,6 +968,7 @@ mod tests {
 
     fn temp_cred(key: &str, expiration: DateTime<Utc>) -> StsTempCredential {
         StsTempCredential {
+            session_tags: Default::default(),
             access_key_id: key.to_string(),
             secret_access_key: "s".to_string(),
             session_token: "t".to_string(),
@@ -1007,6 +1033,7 @@ mod tests {
         state.sts_temp_credentials.insert(
             "FSIAOLD".to_string(),
             StsTempCredential {
+                session_tags: Default::default(),
                 access_key_id: "FSIAOLD".to_string(),
                 secret_access_key: "s".to_string(),
                 session_token: "t".to_string(),

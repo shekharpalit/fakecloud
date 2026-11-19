@@ -1897,6 +1897,80 @@ mod tests {
         assert!(body.contains("<Account>"));
     }
 
+    // ── Trust policy: session tags ──
+
+    const TAGGED_TRUST: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":["sts:AssumeRole","sts:TagSession"],"Condition":{"StringLike":{"aws:RequestTag/tenant":"?*"},"ForAllValues:StringEquals":{"aws:TagKeys":["tenant"]}}}]}"#;
+
+    #[tokio::test]
+    async fn assume_role_with_the_required_session_tag_carries_it_as_a_principal_tag() {
+        let (svc, state) = make_sts_service();
+        let role_arn = create_role_in_state_with_trust(&state, "tagged", TAGGED_TRUST);
+        let req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", &role_arn),
+                ("RoleSessionName", "sess"),
+                ("Tags.member.1.Key", "tenant"),
+                ("Tags.member.1.Value", "acme"),
+            ],
+        );
+        let resp = svc.handle(req).await.unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+        let key = body
+            .split("<AccessKeyId>")
+            .nth(1)
+            .unwrap()
+            .split('<')
+            .next()
+            .unwrap();
+        let tags = state
+            .write()
+            .get_or_create("123456789012")
+            .credential_secret(key)
+            .unwrap()
+            .principal_tags
+            .unwrap();
+        assert_eq!(tags.get("tenant").map(String::as_str), Some("acme"));
+    }
+
+    #[tokio::test]
+    async fn assume_role_without_the_required_session_tag_is_denied() {
+        let (svc, state) = make_sts_service();
+        let role_arn = create_role_in_state_with_trust(&state, "tagged", TAGGED_TRUST);
+        let req = sts_request(
+            "AssumeRole",
+            vec![("RoleArn", &role_arn), ("RoleSessionName", "sess")],
+        );
+        let err = svc
+            .handle(req)
+            .await
+            .err()
+            .expect("a trust policy requiring the tag denies an untagged call");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn assume_role_with_session_tags_needs_tag_session_in_the_trust_policy() {
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "untagged", trust);
+        let req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", &role_arn),
+                ("RoleSessionName", "sess"),
+                ("Tags.member.1.Key", "tenant"),
+                ("Tags.member.1.Value", "acme"),
+            ],
+        );
+        let err = svc
+            .handle(req)
+            .await
+            .err()
+            .expect("tags without sts:TagSession are denied");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
     // ── Trust policy: ExternalId enforcement ──
 
     #[tokio::test]

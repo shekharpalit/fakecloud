@@ -89,6 +89,7 @@ impl StsService {
         state.sts_temp_credentials.insert(
             creds.access_key_id.clone(),
             StsTempCredential {
+                session_tags: Default::default(),
                 access_key_id: creds.access_key_id.clone(),
                 secret_access_key: creds.secret_access_key.clone(),
                 session_token: creds.session_token.clone(),

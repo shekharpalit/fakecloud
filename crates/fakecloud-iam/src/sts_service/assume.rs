@@ -4,6 +4,16 @@ use super::*;
 
 impl StsService {
     pub(super) fn assume_role(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // Session tags (`Tags.member.N.Key` / `.Value`): the trust policy sees
+        // them as `aws:RequestTag/<key>` and `aws:TagKeys`, and the session
+        // carries them as `aws:PrincipalTag/<key>`.
+        let request_tags: std::collections::BTreeMap<String, String> = (1..=50)
+            .map_while(|i| {
+                let key = req.query_params.get(&format!("Tags.member.{i}.Key"))?;
+                let value = req.query_params.get(&format!("Tags.member.{i}.Value"))?;
+                Some((key.clone(), value.clone()))
+            })
+            .collect();
         let role_arn = req.query_params.get("RoleArn").ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -208,19 +218,38 @@ impl StsService {
                 vec![caller_principal.account_id.clone()],
             );
 
-            let eval_req = EvalRequest {
-                principal: &caller_principal,
-                action: "sts:AssumeRole".to_string(),
-                resource: role_arn.clone(),
-                context,
-            };
-            match crate::evaluator::evaluate_resource_policy_for_role(
-                &trust_doc,
-                caller_role_arn.as_deref(),
-                &eval_req,
-            ) {
-                Decision::Allow => {}
-                _ => {
+            if !request_tags.is_empty() {
+                context.request_tags = Some(
+                    request_tags
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                );
+            }
+            // Passing session tags also needs `sts:TagSession` in the trust policy.
+            let mut actions = vec!["sts:AssumeRole"];
+            if !request_tags.is_empty() {
+                actions.push("sts:TagSession");
+            }
+            let trusted = actions.into_iter().all(|action| {
+                let eval_req = EvalRequest {
+                    principal: &caller_principal,
+                    action: action.to_string(),
+                    resource: role_arn.clone(),
+                    context: context.clone(),
+                };
+                matches!(
+                    crate::evaluator::evaluate_resource_policy_for_role(
+                        &trust_doc,
+                        caller_role_arn.as_deref(),
+                        &eval_req,
+                    ),
+                    Decision::Allow
+                )
+            });
+            match trusted {
+                true => {}
+                false => {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::FORBIDDEN,
                         "AccessDenied",
@@ -293,6 +322,7 @@ impl StsService {
         target_state.sts_temp_credentials.insert(
             creds.access_key_id.clone(),
             StsTempCredential {
+                session_tags: request_tags.clone(),
                 access_key_id: creds.access_key_id.clone(),
                 secret_access_key: creds.secret_access_key.clone(),
                 session_token: creds.session_token.clone(),
@@ -622,6 +652,7 @@ impl StsService {
         target_state.sts_temp_credentials.insert(
             creds.access_key_id.clone(),
             StsTempCredential {
+                session_tags: Default::default(),
                 access_key_id: creds.access_key_id.clone(),
                 secret_access_key: creds.secret_access_key.clone(),
                 session_token: creds.session_token.clone(),
@@ -873,6 +904,7 @@ impl StsService {
         target_state.sts_temp_credentials.insert(
             creds.access_key_id.clone(),
             StsTempCredential {
+                session_tags: Default::default(),
                 access_key_id: creds.access_key_id.clone(),
                 secret_access_key: creds.secret_access_key.clone(),
                 session_token: creds.session_token.clone(),
@@ -1073,6 +1105,7 @@ impl StsService {
         state.sts_temp_credentials.insert(
             creds.access_key_id.clone(),
             StsTempCredential {
+                session_tags: Default::default(),
                 access_key_id: creds.access_key_id.clone(),
                 secret_access_key: creds.secret_access_key.clone(),
                 session_token: creds.session_token.clone(),
@@ -1154,6 +1187,7 @@ impl StsService {
         state.sts_temp_credentials.insert(
             creds.access_key_id.clone(),
             StsTempCredential {
+                session_tags: Default::default(),
                 access_key_id: creds.access_key_id.clone(),
                 secret_access_key: creds.secret_access_key.clone(),
                 session_token: creds.session_token.clone(),
